@@ -75,27 +75,29 @@ private enum PreviewContent {
     static func make(for item: ClipboardItem, data: ClipboardItemData?) -> NSView? {
         let body: NSView
         var details: String?
+        // Full content (text, etc.) comes from `data`; list rows only carry a short preview
+        let meta = data?.metadata ?? item.metadata
 
         switch item.type {
         case .image:
             guard let raw = data?.rawData, let image = downsampledImage(raw) else { return nil }
             body = imageView(image)
-            if let w = item.metadata.imageWidth, let h = item.metadata.imageHeight {
+            if let w = meta.imageWidth, let h = meta.imageHeight {
                 details = "\(w) × \(h)"
             }
 
         case .color:
-            guard let hex = item.metadata.colorHex else { return nil }
-            body = colorView(hex: hex, rgba: item.metadata.colorRGBA)
+            guard let hex = meta.colorHex else { return nil }
+            body = colorView(hex: hex, rgba: meta.colorRGBA)
 
         case .file:
-            body = textView(item.metadata.filePath ?? item.contentPreview)
-            if let size = item.metadata.fileSize {
+            body = textView(meta.filePath ?? item.contentPreview)
+            if let size = meta.fileSize {
                 details = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
             }
 
         default:
-            let text = item.metadata.plainText ?? item.metadata.urlString ?? item.contentPreview
+            let text = meta.plainText ?? meta.urlString ?? item.contentPreview
             body = textView(text)
             details = "\(text.count) characters"
         }

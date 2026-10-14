@@ -280,11 +280,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleClearAll() {
         if PreviewMode.isEnabled { return } // keep the sample data
         dismissPopup()
+        let usage = clipboardStore.storageUsage()
+        let size = { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
         let alert = NSAlert()
         alert.messageText = "Clear clipboard history?"
-        alert.informativeText = "This removes everything except pinned items."
+        alert.informativeText = "Your history uses \(size(usage.total)). "
+            + "Clearing removes everything except pinned items and frees about \(size(usage.clearable))."
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Clear").hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         try? clipboardStore.deleteAll()

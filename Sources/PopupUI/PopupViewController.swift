@@ -33,11 +33,6 @@ private final class ThinScroller: NSScroller {
     }
 }
 
-/// Top-to-bottom document view for the scrolling list
-private final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
-}
-
 /// The main list controller for the popup. Clipboard items scroll; "Clear all" stays pinned below.
 final class PopupViewController: NSViewController {
 
@@ -54,20 +49,24 @@ final class PopupViewController: NSViewController {
 
     private var effectView: NSView!
     private let scrollView = NSScrollView()
-    private let listStack = NSStackView()
+    /// The scrolling list. A table so only on-screen rows exist (~10), reused while
+    /// scrolling; building all 200 rows up front made opening take ~130ms.
+    private let tableView = NSTableView()
+    private static let itemCellID = NSUserInterfaceItemIdentifier("item")
+    private static let separatorCellID = NSUserInterfaceItemIdentifier("separator")
     private let footerStack = NSStackView()
     private var scrollHeightConstraint: NSLayoutConstraint!
     private var footerTopConstraint: NSLayoutConstraint!
     private let emptyLabel = NSTextField(labelWithString: "")
-    private var stackTopConstraint: NSLayoutConstraint!
     /// Padding above the first row lives inside the scroll view, so rows scroll
     /// up to the window edge instead of being cut off at the padding line
-    private var listTopConstraint: NSLayoutConstraint!
+    private let listTopPadding = TrayTheme.Spacing.contentInset
 
     // MARK: - Data
 
     private var rows: [PopupRow] = []
-    private var rowViews: [NSView] = []
+    /// Views for the fixed footer rows ("Clear all"), in order
+    private var footerViews: [NSView] = []
     private var pinnedItems: [ClipboardItem] = []
     private var recentItems: [ClipboardItem] = []
     private var selectedIndex: Int = -1
@@ -131,14 +130,17 @@ final class PopupViewController: NSViewController {
     // MARK: - Setup
 
     private func setupList() {
-        listStack.translatesAutoresizingMaskIntoConstraints = false
-        listStack.orientation = .vertical
-        listStack.alignment = .leading
-        listStack.spacing = TrayTheme.Row.gap
-
-        let documentView = FlippedView()
-        documentView.translatesAutoresizingMaskIntoConstraints = false
-        documentView.addSubview(listStack)
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
+        column.width = TrayTheme.Window.width - TrayTheme.Spacing.contentInset * 2
+        tableView.addTableColumn(column)
+        tableView.headerView = nil
+        tableView.style = .plain
+        tableView.backgroundColor = .clear
+        tableView.selectionHighlightStyle = .none
+        tableView.intercellSpacing = NSSize(width: 0, height: TrayTheme.Row.gap)
+        tableView.refusesFirstResponder = true // keys are handled here
+        tableView.dataSource = self
+        tableView.delegate = self
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.drawsBackground = false
@@ -147,7 +149,10 @@ final class PopupViewController: NSViewController {
         scrollView.autohidesScrollers = true
         scrollView.scrollerStyle = .overlay
         scrollView.verticalScrollElasticity = .allowed
-        scrollView.documentView = documentView
+        // Top padding inside the scroll area, so rows scroll up to the window edge
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets(top: listTopPadding, left: 0, bottom: 0, right: 0)
+        scrollView.documentView = tableView
         scrollView.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
             self, selector: #selector(listDidScroll),
@@ -156,23 +161,12 @@ final class PopupViewController: NSViewController {
         effectView.addSubview(scrollView)
 
         let pad = TrayTheme.Spacing.contentInset
-        stackTopConstraint = scrollView.topAnchor.constraint(equalTo: effectView.topAnchor)
-        listTopConstraint = listStack.topAnchor.constraint(equalTo: documentView.topAnchor, constant: pad)
         scrollHeightConstraint = scrollView.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            stackTopConstraint,
+            scrollView.topAnchor.constraint(equalTo: effectView.topAnchor),
             scrollHeightConstraint,
             scrollView.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: pad),
             scrollView.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -pad + TrayTheme.Scroller.trailingOutset),
-
-            documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            documentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-
-            listTopConstraint,
-            listStack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
-            listStack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
-            listStack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
         ])
     }
 
@@ -223,13 +217,39 @@ final class PopupViewController: NSViewController {
     /// Index of the selectable row under `point` (in `view` coordinates).
     /// List rows only count inside the scroll view's visible area.
     private func rowIndex(at point: NSPoint) -> Int? {
-        let listFrame = scrollView.convert(scrollView.bounds, to: view)
-        for (i, rowView) in rowViews.enumerated() {
+        for (k, footerView) in footerViews.enumerated() {
+            let i = listCount + k
             if case .separator = rows[i] { continue }
-            if !isFooterRow(i) && !listFrame.contains(point) { continue }
-            if rowView.convert(rowView.bounds, to: view).contains(point) { return i }
+            if footerView.convert(footerView.bounds, to: view).contains(point) { return i }
         }
-        return nil
+        guard scrollView.convert(scrollView.bounds, to: view).contains(point) else { return nil }
+        let row = tableView.row(at: tableView.convert(point, from: view))
+        guard row >= 0, row < listCount else { return nil }
+        if case .separator = rows[row] { return nil }
+        return row
+    }
+
+    /// Rows shown in the scrolling list; the rest are footer rows
+    private var listCount: Int { rows.count - footerRowCount }
+
+    /// The view showing row `index`, if it's on screen
+    private func cellView(at index: Int) -> NSView? {
+        guard index >= 0, index < rows.count else { return nil }
+        if isFooterRow(index) { return footerViews[safe: index - listCount] }
+        return tableView.view(atColumn: 0, row: index, makeIfNecessary: false)
+    }
+
+    /// Row `index`'s frame in screen coordinates
+    private func rowFrameOnScreen(_ index: Int) -> NSRect? {
+        guard let window = view.window, index >= 0, index < rows.count else { return nil }
+        let inWindow: NSRect
+        if isFooterRow(index) {
+            guard let footerView = footerViews[safe: index - listCount] else { return nil }
+            inWindow = footerView.convert(footerView.bounds, to: nil)
+        } else {
+            inWindow = tableView.convert(tableView.rect(ofRow: index), to: nil)
+        }
+        return window.convertToScreen(inWindow)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -257,7 +277,7 @@ final class PopupViewController: NSViewController {
     /// The "›" hit area under `point` (in row coordinates), with its row index
     private func chevronHitFrame(at point: NSPoint) -> (row: Int, frame: NSRect)? {
         guard let i = rowIndex(at: point),
-              let cell = rowViews[i] as? ClipboardItemCellView,
+              let cell = cellView(at: i) as? ClipboardItemCellView,
               let frame = cell.chevronHitFrame,
               frame.contains(cell.convert(point, from: view)) else { return nil }
         return (i, frame)
@@ -326,46 +346,36 @@ final class PopupViewController: NSViewController {
     }
 
     private func rebuildViews() {
-        // Remove old views
         hidePreview()
-        for v in rowViews { v.removeFromSuperview() }
-        isScrollingProgrammatically = true
-        scrollView.contentView.scroll(to: .zero)
-        isScrollingProgrammatically = false
-        rowViews.removeAll()
         selectedIndex = -1
 
-        let cellWidth = TrayTheme.Window.width - TrayTheme.Spacing.contentInset * 2
+        // Scrolling list: the table builds only the rows on screen
+        tableView.reloadData()
+        isScrollingProgrammatically = true
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: -listTopPadding))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        isScrollingProgrammatically = false
 
-        for (index, row) in rows.enumerated() {
+        // Fixed footer
+        footerViews.forEach { $0.removeFromSuperview() }
+        footerViews = rows[listCount...].map { row in
             let rowView: NSView
-
             switch row {
-            case .clipboardItem(let item):
-                let cell = ClipboardItemCellView()
-                cell.configure(with: item)
-                cell.setSelected(false)
-                rowView = cell
-
-            case .separator:
-                let cell = SeparatorCellView()
-                rowView = cell
-
             case .clearAll:
                 let cell = ActionRowCellView()
                 cell.configure(title: "Clear all")
                 cell.setSelected(false)
                 rowView = cell
-
+            default:
+                rowView = SeparatorCellView()
             }
-
             rowView.translatesAutoresizingMaskIntoConstraints = false
-            (isFooterRow(index) ? footerStack : listStack).addArrangedSubview(rowView)
+            footerStack.addArrangedSubview(rowView)
             NSLayoutConstraint.activate([
-                rowView.widthAnchor.constraint(equalToConstant: cellWidth),
+                rowView.widthAnchor.constraint(equalToConstant: TrayTheme.Window.width - TrayTheme.Spacing.contentInset * 2),
                 rowView.heightAnchor.constraint(equalToConstant: height(of: row)),
             ])
-            rowViews.append(rowView)
+            return rowView
         }
     }
 
@@ -380,10 +390,10 @@ final class PopupViewController: NSViewController {
             + TrayTheme.Row.gap * CGFloat(maxVisibleRows - 1)
         let listHeight = min(stackedHeight(listRows), maxListHeight)
         let footerHeight = stackedHeight(footerRows)
-        scrollHeightConstraint.constant = listTopConstraint.constant + listHeight
+        scrollHeightConstraint.constant = listTopPadding + listHeight
         footerTopConstraint.constant = footerRows.isEmpty ? 0 : TrayTheme.Row.footerGap
 
-        var contentHeight = listTopConstraint.constant + listHeight
+        var contentHeight = listTopPadding + listHeight
         if !footerRows.isEmpty {
             contentHeight += TrayTheme.Row.footerGap + footerHeight
         }
@@ -408,17 +418,15 @@ final class PopupViewController: NSViewController {
     // MARK: - Selection
 
     private func setSelection(_ index: Int) {
-        // Deselect old
-        if selectedIndex >= 0 && selectedIndex < rowViews.count {
-            if let c = rowViews[selectedIndex] as? ClipboardItemCellView { c.setSelected(false) }
-            else if let c = rowViews[selectedIndex] as? ActionRowCellView { c.setSelected(false) }
-        }
+        // Off-screen rows pick up the selection when the table builds them
+        Self.setSelected(cellView(at: selectedIndex), false)
         selectedIndex = index
-        // Select new
-        if selectedIndex >= 0 && selectedIndex < rowViews.count {
-            if let c = rowViews[selectedIndex] as? ClipboardItemCellView { c.setSelected(true) }
-            else if let c = rowViews[selectedIndex] as? ActionRowCellView { c.setSelected(true) }
-        }
+        Self.setSelected(cellView(at: selectedIndex), true)
+    }
+
+    private static func setSelected(_ cell: NSView?, _ selected: Bool) {
+        if let c = cell as? ClipboardItemCellView { c.setSelected(selected) }
+        else if let c = cell as? ActionRowCellView { c.setSelected(selected) }
     }
 
     private func selectFirstRecentItem() {
@@ -482,14 +490,15 @@ final class PopupViewController: NSViewController {
     }
 
     private func scrollSelectionIntoView() {
-        guard selectedIndex >= 0 && selectedIndex < rowViews.count, !isFooterRow(selectedIndex),
-              let documentView = scrollView.documentView else { return }
-        let rowView = rowViews[selectedIndex]
-        // Include the top padding so the first row scrolls fully back into place
-        let pad = listTopConstraint.constant
-        let rect = rowView.convert(rowView.bounds, to: documentView).insetBy(dx: 0, dy: -pad)
+        guard selectedIndex >= 0, selectedIndex < listCount else { return }
         isScrollingProgrammatically = true
-        documentView.scrollToVisible(rect)
+        if rows[..<selectedIndex].allSatisfy({ if case .clipboardItem = $0 { return false } else { return true } }) {
+            // First row: scroll fully to the top so the padding above it shows too
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: -listTopPadding))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        } else {
+            tableView.scrollRowToVisible(selectedIndex)
+        }
         isScrollingProgrammatically = false
     }
 
@@ -547,8 +556,7 @@ final class PopupViewController: NSViewController {
         hidePreview()
         setSelection(index)
 
-        let rowView = rowViews[index]
-        let rowOnScreen = window.convertToScreen(rowView.convert(rowView.bounds, to: nil))
+        guard let rowOnScreen = rowFrameOnScreen(index) else { return }
         let menu = MenuPanel(entries: MenuEntry.actions(for: item) { [weak self] action in
             self?.onAction?(action, item)
         })
@@ -608,8 +616,7 @@ final class PopupViewController: NSViewController {
         let panel = previewPanel ?? PreviewPanel()
         previewPanel = panel
 
-        let rowView = rowViews[selectedIndex]
-        let rowOnScreen = window.convertToScreen(rowView.convert(rowView.bounds, to: nil))
+        guard let rowOnScreen = rowFrameOnScreen(selectedIndex) else { return }
         // Attach only once it has content, so it never flashes empty
         if panel.show(item, data: previewDataProvider?(item), besideRow: rowOnScreen, in: visibleFrameOnScreen),
            panel.parent == nil {
@@ -626,4 +633,43 @@ final class PopupViewController: NSViewController {
     // MARK: - First Responder
 
     override var acceptsFirstResponder: Bool { true }
+}
+
+// MARK: - Table
+
+extension PopupViewController: NSTableViewDataSource, NSTableViewDelegate {
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        listCount
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        height(of: rows[row])
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        switch rows[row] {
+        case .clipboardItem(let item):
+            let cell = tableView.makeView(withIdentifier: Self.itemCellID, owner: nil) as? ClipboardItemCellView
+                ?? ClipboardItemCellView()
+            cell.identifier = Self.itemCellID
+            cell.configure(with: item)
+            cell.setSelected(row == selectedIndex)
+            return cell
+        case .separator, .clearAll:
+            let cell = tableView.makeView(withIdentifier: Self.separatorCellID, owner: nil) ?? SeparatorCellView()
+            cell.identifier = Self.separatorCellID
+            return cell
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        false // selection is drawn by the cells
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
 }

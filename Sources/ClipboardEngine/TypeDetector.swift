@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 import os
 
@@ -6,9 +7,16 @@ private let logger = Logger(subsystem: "com.tray.app", category: "TypeDetector")
 
 enum TypeDetector {
 
-    /// Determines ClipboardItemType from pasteboard contents.
+    struct Detected {
+        let type: ClipboardItemType
+        var metadata: ClipboardItemMetadata
+        /// Image bytes as copied (PNG or TIFF), read once and reused for hashing and saving
+        var imageData: Data? = nil
+    }
+
+    /// Determines ClipboardItemType from pasteboard contents. Safe to call off the main thread.
     /// Priority order: file > url > image > richText > html > color > tabularData > plainText
-    static func detect(from pasteboard: NSPasteboard) -> (type: ClipboardItemType, metadata: ClipboardItemMetadata)? {
+    static func detect(from pasteboard: NSPasteboard) -> Detected? {
         guard let types = pasteboard.types else { return nil }
 
         var metadata = ClipboardItemMetadata()
@@ -22,7 +30,7 @@ enum TypeDetector {
             if let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path) {
                 metadata.fileSize = attrs[.size] as? Int64
             }
-            return (.file, metadata)
+            return Detected(type: .file, metadata: metadata)
         }
 
         // URL
@@ -31,18 +39,20 @@ enum TypeDetector {
            URL(string: urlString) != nil {
             metadata.urlString = urlString
             metadata.plainText = urlString
-            return (.url, metadata)
+            return Detected(type: .url, metadata: metadata)
         }
 
         // Image
         let imageTypes: [NSPasteboard.PasteboardType] = [.png, .tiff]
         for imgType in imageTypes {
             if types.contains(imgType), let data = pasteboard.data(forType: imgType) {
-                if let image = NSImage(data: data), image.size.width.isFinite, image.size.height.isFinite {
-                    metadata.imageWidth = Int(image.size.width)
-                    metadata.imageHeight = Int(image.size.height)
+                // Read pixel size from the header only; no full decode
+                if let source = CGImageSourceCreateWithData(data as CFData, nil),
+                   let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+                    metadata.imageWidth = props[kCGImagePropertyPixelWidth] as? Int
+                    metadata.imageHeight = props[kCGImagePropertyPixelHeight] as? Int
                 }
-                return (.image, metadata)
+                return Detected(type: .image, metadata: metadata, imageData: data)
             }
         }
 
@@ -52,7 +62,7 @@ enum TypeDetector {
             if let plain = pasteboard.string(forType: .string) {
                 metadata.plainText = plain
             }
-            return (.richText, metadata)
+            return Detected(type: .richText, metadata: metadata)
         }
 
         // HTML — many apps (Notion, Google Docs, browsers) put styled text as HTML.
@@ -63,10 +73,10 @@ enum TypeDetector {
             if let plain = pasteboard.string(forType: .string) {
                 metadata.plainText = plain
                 // Has plain text → user copied styled content, classify as rich text
-                return (.richText, metadata)
+                return Detected(type: .richText, metadata: metadata)
             }
             // No plain text fallback → actual HTML content
-            return (.html, metadata)
+            return Detected(type: .html, metadata: metadata)
         }
 
         // Color (NSColor pasteboard)
@@ -78,7 +88,7 @@ enum TypeDetector {
                 let a = color.alphaComponent
                 metadata.colorRGBA = [Double(r), Double(g), Double(b), Double(a)]
                 metadata.colorHex = String(format: "#%02X%02X%02X", byte(r), byte(g), byte(b))
-                return (.color, metadata)
+                return Detected(type: .color, metadata: metadata)
             }
         }
 
@@ -93,10 +103,10 @@ enum TypeDetector {
                 metadata.rowCount = rows.count
                 metadata.columnCount = cols
                 metadata.tsvData = text
-                return (.tabularData, metadata)
+                return Detected(type: .tabularData, metadata: metadata)
             }
 
-            return (.plainText, metadata)
+            return Detected(type: .plainText, metadata: metadata)
         }
 
         return nil

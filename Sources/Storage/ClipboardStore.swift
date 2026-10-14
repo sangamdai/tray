@@ -7,9 +7,17 @@ final class ClipboardStore: ClipboardStoring {
 
     private let db: SQLiteDB
     private let imageStorage: ImageStorage
+    /// On-disk database file; nil for in-memory stores
+    private var dbFilePath: String?
+    /// Read on the clipboard thread (save), written on main (menu); guarded by `limitLock`
     private var maxHistoryItems: Int
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
+    private let limitLock = NSLock()
+
+    /// Columns list rows need: everything except `payload_json`, so listing never reads
+    /// full clip content. (JSONEncoder/Decoder are created per call: the store is used
+    /// from both the main thread and the clipboard thread.)
+    private static let listColumns = "id, type, created_at, is_pinned, is_hidden, custom_name, "
+        + "source_app_id, source_app_name, content_preview, data_hash, metadata_json"
 
     init(
         dbPath: String? = nil,
@@ -24,6 +32,7 @@ final class ClipboardStore: ClipboardStoring {
         } else {
             let path = dbPath ?? ClipboardStore.defaultDBPath()
             self.db = try SQLiteDB(path: path)
+            self.dbFilePath = path
         }
 
         self.imageStorage = imageStorage ?? ImageStorage()
@@ -40,7 +49,7 @@ final class ClipboardStore: ClipboardStoring {
 
     /// Changes how many unpinned items are kept, trimming the oldest right away if lowered
     func setMaxHistoryItems(_ limit: Int) {
-        maxHistoryItems = limit
+        limitLock.withLock { maxHistoryItems = limit }
         do {
             try enforceMaxHistory()
         } catch {
@@ -51,8 +60,10 @@ final class ClipboardStore: ClipboardStoring {
     // MARK: - ClipboardStoring
 
     func save(_ item: ClipboardItem) throws {
-        let metadataJSON = try encoder.encode(item.metadata)
-        let metadataString = String(data: metadataJSON, encoding: .utf8) ?? "{}"
+        let encoder = JSONEncoder()
+        let metadataString = String(decoding: try encoder.encode(item.metadata.withoutPayload), as: UTF8.self)
+        let payload = item.metadata.payload
+        let payloadString: String? = payload.isEmpty ? nil : String(decoding: try encoder.encode(payload), as: UTF8.self)
 
         // Check for duplicate by hash — bump timestamp instead of inserting
         let existing = try db.query(
@@ -71,8 +82,8 @@ final class ClipboardStore: ClipboardStoring {
                 sql: """
                     INSERT INTO clipboard_items
                     (id, type, created_at, is_pinned, is_hidden, custom_name,
-                     source_app_id, source_app_name, content_preview, data_hash, metadata_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     source_app_id, source_app_name, content_preview, data_hash, metadata_json, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 params: [
                     item.id.uuidString,
@@ -85,7 +96,8 @@ final class ClipboardStore: ClipboardStoring {
                     item.sourceAppName as Any?,
                     item.contentPreview,
                     item.dataHash,
-                    metadataString
+                    metadataString,
+                    payloadString as Any?
                 ]
             )
         }
@@ -97,7 +109,7 @@ final class ClipboardStore: ClipboardStoring {
         do {
             let rows = try db.query(
                 sql: """
-                    SELECT * FROM clipboard_items
+                    SELECT \(Self.listColumns) FROM clipboard_items
                     WHERE is_pinned = 0
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -114,7 +126,7 @@ final class ClipboardStore: ClipboardStoring {
     func fetchPinned() -> [ClipboardItem] {
         do {
             let rows = try db.query(
-                sql: "SELECT * FROM clipboard_items WHERE is_pinned = 1 ORDER BY created_at DESC"
+                sql: "SELECT \(Self.listColumns) FROM clipboard_items WHERE is_pinned = 1 ORDER BY created_at DESC"
             )
             return rows.compactMap { rowToItem($0) }
         } catch {
@@ -128,7 +140,7 @@ final class ClipboardStore: ClipboardStoring {
             let pattern = "%\(query)%"
             let rows = try db.query(
                 sql: """
-                    SELECT * FROM clipboard_items
+                    SELECT \(Self.listColumns) FROM clipboard_items
                     WHERE content_preview LIKE ? OR custom_name LIKE ?
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -160,6 +172,9 @@ final class ClipboardStore: ClipboardStoring {
             }
         }
         try db.execute(sql: "DELETE FROM clipboard_items WHERE is_pinned = 0")
+        // Actually give the space back: deleting rows alone doesn't shrink the file
+        try db.execute(sql: "VACUUM")
+        _ = try? db.query(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
     }
 
     func togglePin(id: UUID) throws {
@@ -183,6 +198,39 @@ final class ClipboardStore: ClipboardStoring {
         )
     }
 
+    struct StorageUsage {
+        /// Database plus saved images, in bytes
+        let total: Int64
+        /// What clearing would free: unpinned items' data and images
+        let clearable: Int64
+    }
+
+    func storageUsage() -> StorageUsage {
+        let fm = FileManager.default
+        func fileSize(_ path: String) -> Int64 {
+            ((try? fm.attributesOfItem(atPath: path))?[.size] as? Int64) ?? 0
+        }
+
+        var total: Int64 = 0
+        if let path = dbFilePath {
+            total += [path, path + "-wal", path + "-shm"].map(fileSize).reduce(0, +)
+        }
+        let imageFiles = (try? fm.contentsOfDirectory(atPath: imageStorage.imagesDirectory.path)) ?? []
+        total += imageFiles.map { fileSize(imageStorage.imagesDirectory.appendingPathComponent($0).path) }.reduce(0, +)
+
+        var clearable = Int64((try? db.scalar(sql: """
+            SELECT SUM(LENGTH(metadata_json) + IFNULL(LENGTH(payload_json), 0) + LENGTH(content_preview))
+            FROM clipboard_items WHERE is_pinned = 0
+            """)) ?? 0)
+        let unpinnedImages = (try? db.query(sql: "SELECT id FROM clipboard_items WHERE is_pinned = 0 AND type = 'image'")) ?? []
+        for row in unpinnedImages {
+            if let id = row["id"] as? String {
+                clearable += fileSize(imageStorage.imagesDirectory.appendingPathComponent("\(id).png").path)
+            }
+        }
+        return StorageUsage(total: total, clearable: min(clearable, total))
+    }
+
     func itemCount() -> Int {
         (try? db.scalar(sql: "SELECT COUNT(*) FROM clipboard_items")) ?? 0
     }
@@ -195,10 +243,14 @@ final class ClipboardStore: ClipboardStoring {
     func getFullData(id: UUID) -> ClipboardItemData? {
         do {
             let rows = try db.query(
-                sql: "SELECT * FROM clipboard_items WHERE id = ?",
+                sql: "SELECT \(Self.listColumns), payload_json FROM clipboard_items WHERE id = ?",
                 params: [id.uuidString]
             )
-            guard let row = rows.first, let item = rowToItem(row) else { return nil }
+            guard let row = rows.first, var item = rowToItem(row) else { return nil }
+            if let json = (row["payload_json"] as? String)?.data(using: .utf8),
+               let payload = try? JSONDecoder().decode(ClipboardPayload.self, from: json) {
+                item.metadata.apply(payload)
+            }
 
             var rawData: Data?
             switch item.type {
@@ -249,7 +301,7 @@ final class ClipboardStore: ClipboardStoring {
 
         let metadata: ClipboardItemMetadata
         if let data = metadataJSON.data(using: .utf8) {
-            metadata = (try? decoder.decode(ClipboardItemMetadata.self, from: data)) ?? .empty
+            metadata = (try? JSONDecoder().decode(ClipboardItemMetadata.self, from: data)) ?? .empty
         } else {
             metadata = .empty
         }
@@ -273,9 +325,10 @@ final class ClipboardStore: ClipboardStoring {
         let count = try db.scalar(
             sql: "SELECT COUNT(*) FROM clipboard_items WHERE is_pinned = 0"
         )
-        guard count > maxHistoryItems else { return }
+        let limit = limitLock.withLock { maxHistoryItems }
+        guard count > limit else { return }
 
-        let excess = count - maxHistoryItems
+        let excess = count - limit
         // Get IDs of oldest non-pinned items to clean up files
         let rows = try db.query(
             sql: """

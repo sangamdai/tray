@@ -178,4 +178,44 @@ final class ClipboardStoreTests: XCTestCase {
         XCTAssertEqual(pinned.count, 3)
         XCTAssertEqual(pinned[0].contentPreview, "pin 2") // newest first
     }
+
+    // MARK: - Payload storage
+
+    func test_listingOmitsFullContent_fullDataIncludesIt() throws {
+        let longText = String(repeating: "x", count: 10_000)
+        let item = ClipboardItem(
+            type: .plainText,
+            contentPreview: "x",
+            dataHash: "long",
+            metadata: ClipboardItemMetadata(plainText: longText)
+        )
+        try store.save(item)
+
+        XCTAssertNil(store.fetchRecent(limit: 10).first?.metadata.plainText)
+        XCTAssertEqual(store.getFullData(id: item.id)?.metadata.plainText, longText)
+    }
+
+    func test_migrationMovesContentOutOfMetadata() throws {
+        // A v1 database: content inside metadata_json, no payload_json column
+        let db = try SQLiteDB(inMemory: true)
+        try db.execute(sql: """
+            CREATE TABLE clipboard_items (
+                id TEXT PRIMARY KEY, type TEXT NOT NULL, created_at REAL NOT NULL,
+                is_pinned INTEGER DEFAULT 0, is_hidden INTEGER DEFAULT 0, custom_name TEXT,
+                source_app_id TEXT, source_app_name TEXT, content_preview TEXT NOT NULL,
+                data_hash TEXT NOT NULL, metadata_json TEXT NOT NULL, UNIQUE(data_hash))
+            """)
+        let id = UUID()
+        let oldMetadata = String(decoding: try JSONEncoder().encode(ClipboardItemMetadata(plainText: "hello")), as: UTF8.self)
+        try db.execute(
+            sql: "INSERT INTO clipboard_items (id, type, created_at, content_preview, data_hash, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+            params: [id.uuidString, "plainText", 1.0, "hello", "h", oldMetadata]
+        )
+
+        let migrated = try ClipboardStore(db: db, imageStorage: ImageStorage(baseDirectory: tempDir))
+
+        XCTAssertNil(migrated.fetchRecent(limit: 10).first?.metadata.plainText)
+        XCTAssertEqual(migrated.getFullData(id: id)?.metadata.plainText, "hello")
+        XCTAssertEqual(try db.scalar(sql: "PRAGMA user_version"), Migrations.currentVersion)
+    }
 }

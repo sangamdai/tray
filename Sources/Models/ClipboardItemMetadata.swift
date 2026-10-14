@@ -16,7 +16,6 @@ struct ClipboardItemMetadata: Codable, Equatable {
     var imageWidth: Int?
     var imageHeight: Int?
     var imagePath: String?
-    var thumbnailPath: String?
 
     // File
     var filePath: String?
@@ -34,4 +33,38 @@ struct ClipboardItemMetadata: Codable, Equatable {
     var tsvData: String?
 
     static let empty = ClipboardItemMetadata()
+}
+
+/// The potentially large fields of ClipboardItemMetadata. Stored in their own
+/// column and loaded only for paste and preview, so opening the popup stays cheap.
+struct ClipboardPayload: Codable, Equatable {
+    var plainText: String?
+    var rtfData: Data?
+    var htmlString: String?
+    var tsvData: String?
+
+    var isEmpty: Bool { plainText == nil && rtfData == nil && htmlString == nil && tsvData == nil }
+}
+
+extension ClipboardItemMetadata {
+    var payload: ClipboardPayload {
+        ClipboardPayload(plainText: plainText, rtfData: rtfData, htmlString: htmlString, tsvData: tsvData)
+    }
+
+    /// Everything except the payload: what list rows need
+    var withoutPayload: ClipboardItemMetadata {
+        var light = self
+        light.plainText = nil
+        light.rtfData = nil
+        light.htmlString = nil
+        light.tsvData = nil
+        return light
+    }
+
+    mutating func apply(_ payload: ClipboardPayload) {
+        plainText = payload.plainText
+        rtfData = payload.rtfData
+        htmlString = payload.htmlString
+        tsvData = payload.tsvData
+    }
 }

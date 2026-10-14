@@ -1,7 +1,10 @@
 import AppKit
 
 /// Single-line row: [icon] [title...] [swatch?] [source app] [› when selected]
-final class ClipboardItemCellView: NSTableCellView {
+///
+/// Lays itself out by hand in `layout()` rather than with Auto Layout: the popup can
+/// hold 200 of these, and solving ~15 constraints per row made opening take ~140ms.
+final class ClipboardItemCellView: NSView {
 
     let iconView = NSImageView()
     let titleLabel = NSTextField(labelWithString: "")
@@ -9,11 +12,6 @@ final class ClipboardItemCellView: NSTableCellView {
     let chevronView = NSImageView()
     /// Color items only: swatch right after the hex text
     let swatchView = NSImageView()
-    private var swatchTrailingLimit: NSLayoutConstraint!
-
-    // Source app sits flush right, or left of the chevron when selected
-    private var timeTrailingToEdge: NSLayoutConstraint!
-    private var timeTrailingToChevron: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -28,89 +26,41 @@ final class ClipboardItemCellView: NSTableCellView {
     private func setup() {
         wantsLayer = true
 
-        let pad = TrayTheme.Row.horizontalPadding
-        let iconSz = TrayTheme.Row.iconSize
-
-        iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
         iconView.contentTintColor = TrayTheme.Colors.iconTint
-        addSubview(iconView)
 
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.font = TrayTheme.Typography.primaryFont
         titleLabel.textColor = TrayTheme.Colors.primaryText
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.maximumNumberOfLines = 1
         titleLabel.cell?.truncatesLastVisibleLine = true
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        addSubview(titleLabel)
 
-        timeLabel.translatesAutoresizingMaskIntoConstraints = false
         timeLabel.font = TrayTheme.Typography.secondaryFont
         timeLabel.textColor = TrayTheme.Colors.tertiaryText
         timeLabel.alignment = .right
         timeLabel.lineBreakMode = .byClipping
         timeLabel.maximumNumberOfLines = 1
-        timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        timeLabel.setContentHuggingPriority(.required, for: .horizontal)
-        addSubview(timeLabel)
 
-        swatchView.translatesAutoresizingMaskIntoConstraints = false
         swatchView.isHidden = true
-        addSubview(swatchView)
 
-        chevronView.translatesAutoresizingMaskIntoConstraints = false
         chevronView.image = TrayTheme.Icons.chevronRight
         chevronView.contentTintColor = .white.withAlphaComponent(0.6)
         chevronView.isHidden = true
-        addSubview(chevronView)
 
-        // Fixed constraints
-        NSLayoutConstraint.activate([
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
-            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: iconSz),
-            iconView.heightAnchor.constraint(equalToConstant: iconSz),
-
-            // Lucide's chevron has ~6px of empty space on its right at 16px,
-            // so it lands visually ~12px from the edge
-            chevronView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            chevronView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            chevronView.widthAnchor.constraint(equalToConstant: TrayTheme.Icons.size),
-            chevronView.heightAnchor.constraint(equalToConstant: TrayTheme.Icons.size),
-
-            timeLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: TrayTheme.Row.spacing),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: timeLabel.leadingAnchor, constant: -4),
-
-            swatchView.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 6),
-            swatchView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            swatchView.widthAnchor.constraint(equalToConstant: TrayTheme.Icons.swatchSize),
-            swatchView.heightAnchor.constraint(equalToConstant: TrayTheme.Icons.swatchSize),
-        ])
-
-        // Only active when the swatch shows, so other rows keep the full title width
-        swatchTrailingLimit = swatchView.trailingAnchor.constraint(lessThanOrEqualTo: timeLabel.leadingAnchor, constant: -4)
-
-        timeTrailingToEdge = timeLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad)
-        timeTrailingToChevron = timeLabel.trailingAnchor.constraint(equalTo: chevronView.leadingAnchor, constant: -8)
-        timeTrailingToEdge.isActive = true
-
+        for view in [iconView, titleLabel, timeLabel, swatchView, chevronView] as [NSView] {
+            addSubview(view)
+        }
     }
 
     func configure(with item: ClipboardItem) {
         if item.isHidden {
             iconView.image = TrayTheme.Icons.hidden
             titleLabel.font = TrayTheme.Typography.hiddenFont
-            titleLabel.stringValue = item.displayLabel
         } else {
             iconView.image = TrayTheme.Icons.itemIcon(for: item)
             titleLabel.font = TrayTheme.Typography.primaryFont
-            titleLabel.stringValue = item.displayLabel
         }
-
+        titleLabel.stringValue = item.displayLabel
         timeLabel.stringValue = item.sourceAppName ?? ""
 
         let swatch = item.type == .color && !item.isHidden
@@ -118,7 +68,7 @@ final class ClipboardItemCellView: NSTableCellView {
             : nil
         swatchView.image = swatch
         swatchView.isHidden = swatch == nil
-        swatchTrailingLimit.isActive = swatch != nil
+        needsLayout = true
     }
 
     /// The clickable area around the "›" (opens the actions menu), in this view's coordinates
@@ -130,8 +80,7 @@ final class ClipboardItemCellView: NSTableCellView {
 
     func setSelected(_ selected: Bool) {
         chevronView.isHidden = !selected
-        timeTrailingToEdge.isActive = !selected
-        timeTrailingToChevron.isActive = selected
+        needsLayout = true
 
         if selected {
             layer?.backgroundColor = TrayTheme.Colors.selection.cgColor
@@ -144,6 +93,44 @@ final class ClipboardItemCellView: NSTableCellView {
             titleLabel.textColor = TrayTheme.Colors.primaryText
             timeLabel.textColor = TrayTheme.Colors.tertiaryText
             iconView.contentTintColor = TrayTheme.Colors.iconTint
+        }
+    }
+
+    // MARK: - Layout
+
+    override func layout() {
+        super.layout()
+        let pad = TrayTheme.Row.horizontalPadding
+        let iconSize = TrayTheme.Row.iconSize
+        let h = bounds.height
+
+        func centered(_ x: CGFloat, width: CGFloat, height: CGFloat) -> NSRect {
+            NSRect(x: x, y: ((h - height) / 2).rounded(), width: width, height: height)
+        }
+
+        iconView.frame = centered(pad, width: iconSize, height: iconSize)
+
+        // Lucide's chevron has ~6px of empty space on its right at 16px,
+        // so it lands visually ~12px from the edge
+        let chevronSize = TrayTheme.Icons.size
+        chevronView.frame = centered(bounds.width - 6 - chevronSize, width: chevronSize, height: chevronSize)
+
+        // Source app: flush right, or 8px left of the chevron when selected
+        let timeSize = timeLabel.stringValue.isEmpty ? .zero : timeLabel.intrinsicContentSize
+        let timeRight = chevronView.isHidden ? bounds.width - pad : chevronView.frame.minX - 8
+        timeLabel.frame = centered(timeRight - timeSize.width, width: timeSize.width, height: timeSize.height)
+
+        // Title fills the space between the icon and the source app; a color swatch sits right after it
+        let titleX = iconView.frame.maxX + TrayTheme.Row.spacing
+        let available = max(timeLabel.frame.minX - 4 - titleX, 0)
+        let titleHeight = titleLabel.intrinsicContentSize.height
+        if swatchView.isHidden {
+            titleLabel.frame = centered(titleX, width: available, height: titleHeight)
+        } else {
+            let swatchSize = TrayTheme.Icons.swatchSize
+            let titleWidth = min(titleLabel.intrinsicContentSize.width, max(available - 6 - swatchSize, 0))
+            titleLabel.frame = centered(titleX, width: titleWidth, height: titleHeight)
+            swatchView.frame = centered(titleLabel.frame.maxX + 6, width: swatchSize, height: swatchSize)
         }
     }
 }
