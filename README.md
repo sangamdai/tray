@@ -23,11 +23,26 @@ Press **⌘⇧V** anywhere to open your clipboard history at the cursor, pick an
 
 ## Install
 
-1. Download `Tray.zip` from [Releases](../../releases) and unzip it.
+1. Download `Tray.zip` from the [latest release](../../releases/latest) and unzip it.
 2. Move `Tray.app` to `/Applications` and open it.
 3. Grant **Accessibility** access when asked (System Settings → Privacy & Security → Accessibility). Tray needs it to paste into other apps.
 
 Requires macOS 14 or later.
+
+### Opening Tray the first time
+
+Tray is free and isn't notarized by Apple, so macOS warns that it "can't verify" the app the first time you open it. To open it anyway:
+
+- **macOS 15 and later:** open Tray once and dismiss the warning, then go to System Settings → Privacy & Security, scroll down, and click **Open Anyway** next to the message about Tray.
+- **macOS 14:** right-click `Tray.app`, choose **Open**, then click **Open** again.
+
+Or, in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Tray.app
+```
+
+You only need to do this once. The source is all here if you'd rather [build it yourself](#build-from-source).
 
 ## Keyboard
 
