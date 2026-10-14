@@ -1,0 +1,13 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# App builds (Scripts/build-app.sh, Scripts/release.sh)
+build/
+
+# macOS
+.DS_Store
+
+# Local tool settings
+.claude/
