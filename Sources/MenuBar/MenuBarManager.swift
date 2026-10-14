@@ -134,7 +134,9 @@ final class MenuBarManager {
         ])
         if let repo = AppInfo.repositoryURL {
             credits.append(NSAttributedString(string: "\n"))
-            credits.append(NSAttributedString(string: repo.absoluteString, attributes: [
+            // Show "github.com/…" without the scheme; the link still opens the full URL
+            let label = (repo.host ?? "") + repo.path
+            credits.append(NSAttributedString(string: label, attributes: [
                 .font: NSFont.systemFont(ofSize: 11),
                 .link: repo,
             ]))
