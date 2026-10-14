@@ -84,12 +84,7 @@ final class MenuPanel: PopupPanel {
             orderFront(nil)
         }
         startForwardingEvents()
-
-        // Same entrance as the main popup
-        if let chrome = menuController.chromeView {
-            contentView?.layoutSubtreeIfNeeded()
-            animateAppearance(of: chrome, fromScaleX: TrayTheme.Appear.fromScaleX, fromScaleY: TrayTheme.Appear.fromScaleY)
-        }
+        // Menus appear instantly; only the main popup animates in
     }
 
     func dismiss() {
@@ -140,8 +135,6 @@ private final class MenuViewController: NSViewController {
     private var selectedIndex = -1
     private var submenu: MenuPanel?
     private var submenuIndex: Int?
-    /// The visible menu; the root view adds a transparent margin around it for the entrance spring
-    private(set) var chromeView: NSView?
 
     init(entries: [MenuEntry?], width: CGFloat, tint: NSColor?) {
         self.entries = entries
@@ -172,7 +165,6 @@ private final class MenuViewController: NSViewController {
             chrome.root.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
         ])
         view = root
-        chromeView = chrome.root
 
         let stack = NSStackView()
         stack.translatesAutoresizingMaskIntoConstraints = false
